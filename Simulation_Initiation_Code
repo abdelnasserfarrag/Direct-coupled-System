@@ -1,0 +1,355 @@
+clear all; clc;
+
+% Initialization file for System one and System two Simulations.
+% This code is created by Abdelnasser Farrag as a part of his master thesis at KIT
+
+%% Control Time
+T_Delay1 = 1; % sec
+T_Delay2 = 1e-3; % sec
+% For RMSE
+F_RMS = 8; %Hz
+Ts_RMS = 0; %sec
+% For scopes and to/from workspace
+Simin_time = 0; %sec / default is 0
+Simout_time = 1; %sec / default is -1
+View_sample_time = 0.1; % sec / default is -1
+%% PI controller for CV control of the battery system
+Ki = 1.4;
+C = 2.2e-4;
+Kp = 8e-4 ;
+L = 4e-4;
+R = 0;
+% For PID controller of the CV control
+Ts = 1e-2;
+% Number of series battery cells
+numCells = 12; %Subjected to change
+
+%% Cell Data Script
+%% Getting Current, Voltage, Temperature profiles for Validating the cell model
+
+load('TestData_E500.mat');
+load('ParametersData_E500.mat');
+
+ocv_ch = ocv(:,1);
+cp_ch = cp(:,1);
+rp_ch = rp(:,1);
+ridc_ch = ridc(:,1);
+
+First_Charge = find(TestData.Command=="Charge", 1, 'first');
+% First_zero = find(TestDataE1.IA==0, 1, 'first'); % Find the first zero in the the current @ zero SOC & Min voltage
+New_table = TestData( First_Charge:end, : );
+New_table.Timeh = New_table.Timeh - New_table.Timeh(1); % Starting from zero second
+% Finding first discharge command to calculate the actual cell capacity
+First_Discharge = find(New_table.Command=="Discharge",1, 'first');
+
+IA = New_table.IA; %Current
+Time = 3600.*New_table.Timeh; %Time
+T1C = 273.15 + New_table.T1C; %Temperature to Kelvin
+UV = New_table.UV.*numCells; %Voltage of cell multiplied by number of cell
+Ibatt_test = timeseries(IA,Time);
+Tbatt_test = timeseries(T1C,Time);
+Vbatt_test = timeseries(UV,Time);
+
+%% Cell Parameters
+%% Thermal Properties
+% Cell dimensions and sizes
+cell_thickness = 0.0147; %m
+cell_width = 0.185; %m
+cell_height = 0.277; %m
+
+%% Cell surface area
+
+%% Horizontal Distribution
+% Convection Thermal Heat Transfer
+Cell_area_height = cell_height * cell_thickness; %m^2
+Cell_area_width = cell_width * cell_thickness; %m^2
+% Conduction Thermal Heat Transfer
+Horizontal_height_distance = cell_height/2; %m
+Horizontal_width_distance = cell_width/2;%m
+
+%% Vertical Distribution
+Vertical_distance = cell_thickness/2;  %m % Distance from the mass center to the vertical border
+cell_plan_area = cell_width * cell_height;  %m^2
+% Cell volume
+cell_volume = cell_thickness * cell_width * cell_height; %m^3
+
+%% Convective heat transfer coefficient
+% Thermal Model Reference: Fraunhofer Institute - Manuel's Email
+%
+% Vertical convection
+% For natural convection this number should be in the range of 5 to 25
+h_vertical_conv = 5;  %W/m^2/K Cell-to-cell
+h_vertical_conv_air = 10;  %W/m^2/K End cells to ambient air
+h_vertical_cond = 22.87;  %W/m.K Center of the cell to cell borders
+%
+%Horizontal convection
+% Horizonal convective heat transfer coefficient
+h_horizontal_conv = 5; %W/m^2/K
+% Horizonal conductive heat transfer coefficient
+h_horizontal_cond = 1.04; %W/m.K Center of the cell to cell borders
+
+%% Calculating the actual cell capacity
+Cell_Capacity = abs(New_table.AhAh(First_Discharge)) + abs(New_table.AhAh(1)); %Ah
+Battery_Capacity = Cell_Capacity*3600; %As
+
+
+%% Connection resistance
+Connection_resistance = 5e-4; %Connection resistance between each two cells
+Terminal_resistance = 5e-4; %Terminal resistance between the first and 12th cells and the terminals
+
+%% Battery Pack
+
+%% Battery
+BatteryParams = struct();
+for idx = 1:numCells
+%%  Lookup Table Breakpoints
+%     Battery capacity
+    BatteryParams(idx).Capacity_LUT = Battery_Capacity; %Ampere*seconds
+
+    %% Battery Charging 
+%     Cell mass
+    BatteryParams(idx).cell_mass = 1.298; %kg %Ref. Julian's email E500
+    
+%     Specific Heat
+%     BatteryParams(idx).cell_Cp_heat = BatteryParams(idx).cell_rho_Cp * cell_volume/BatteryParams(idx).cell_mass; %J/kg/K
+    BatteryParams(idx).cell_Cp_heat = 1366; %J/kg/K %Ref. file from Manuel Baena
+
+%%  Initial Conditions
+%     Ambient Temperature
+    BatteryParams(idx).T_init = 20 + 273.15; %K
+    
+%     Battery Initial SOC
+    BatteryParams(idx).SOC_Init = 0.5; % 0.043; 
+%     
+end
+
+%% *PV Panels*
+Ns = 48; % Number of serial cells
+Module_height = 1.324; %m
+Module_width = 0.992; %m
+Module_area = Module_height*Module_width; % m2 of module
+Cell_area = Module_area/Ns; %m2 of the cell
+thickness = 0.003; %m
+Module_mass = 15.4; %kg
+Cell_mass = Module_mass/Ns; % PV cell mass
+
+%% Electrical Paramters
+Eg = 1.12; %ev
+Voc = 0.63; %V
+Isc = 9.01; %A
+Irrad_meas = 1000; % W/m^2
+N = 1.1; % Ideality factor 1:1.4
+Rs = 0.00443; % series resistance for the cell
+
+%% Thermal Parameters
+Convection_coefficient = 7.5; %W/m^2.K
+Glass_emissivity = 0.9347;
+alpha= 5.6703*10^-8; % Stefan Boltzmann constant
+Radiation_coefficient =Glass_emissivity*alpha; %W/m^2.K^4
+% Specific heat of PV module
+Cp_glass = 840; %J/kg.K
+Cp_silicon = 712; %J/kg.K
+Cp_avg = (Cp_glass + Cp_silicon) /2; %J/kg.K
+
+NOCT = 45; %celsius
+Thermal_mass = Cell_mass*Cp_avg; %J/k for just one cell
+% Thermal_mass= 0.0001; when using Tpv as an input
+
+PV_Albedo = 0.3; % Albedo for the PV panel
+
+% Temperature exponent for Is1
+% TXIS1 = 0.001; When using Tpv as an input
+TXIS1 = 3.38;
+
+% Temperature coefficient of Iph_ref ~ Isc
+TIPH1 = 0.0005;
+
+%% Data retrieving
+%% Configuration / Input Data
+% Usually you have to  supply the follwing information. Some of it has to
+% be asked, some of it can be obtained by looking at the ADEI Source Tree.
+
+% Uncomment, which server you want to obtain data from
+%serverName = 'PCESFDB2.competence-e.kit.edu'; % SafetyFirst
+serverName = 'PCEDB2.competence-e.kit.edu'; % PCE Laboratory
+
+dbName = 'TS05NODCDC'; % Name of the database (usually the first subpoint of a category of the sorce tree i.e. Safety First -> SafetyFirst01
+start = '01/31/2019 06:30:00'; % mm/dd/yyyy % Start point of data, can by copied from ADEI
+stop = '01/31/2019 20:29:59.9'; % mm/dd/yyyy % End point of data, can by copied from ADEI
+
+%Identifying the systemGroups names
+systemGroup1 = 'TS05NODCDC_AC_LOAD'; % the sub sub point of the source tree 
+systemGroup2 = 'TS05NODCDC_DC_BATT'; % the sub sub point of the source tree 
+systemGroup3 = 'TS05NODCDC_DC_DCAC'; % the sub sub point of the source tree 
+systemGroup4 = 'TS05NODCDC_DCBUS_PV'; % the sub sub point of the source tree 
+systemGroup5 = 'TS05NODCDC_OTHER'; % the sub sub point of the source tree 
+
+%Identifying the SensorGroups names
+sensor1 = {'p_ac_inv1_TS05NODCDC','p_ac_inv2_TS05NODCDC'};
+sensor2 = {'p_dc_batt1_TS05NODCDC','p_dc_batt2_TS05NODCDC','u_batt1_TS05NODCDC','u_batt2_TS05NODCDC','i_batt1_TS05NODCDC','i_batt2_TS05NODCDC'};
+sensor3 = {'p_dc_inv1_TS05NODCDC','p_dc_inv2_TS05NODCDC','u_inv1_TS05NODCDC','u_inv2_TS05NODCDC','i_inv1_TS05NODCDC','i_inv2_TS05NODCDC',...
+           'eta_inv1_TS05NODCDC','eta_inv2_TS05NODCDC'};
+
+sensor4 = {'p_dc_pv1_TS05NODCDC','p_dc_div1_TS05NODCDC', 'i_div1_TS05NODCDC', 'u_pv1_TS05NODCDC', 'i_pv1_TS05NODCDC','p_dc_mpp2_TS05NODCDC','u_mpp2_TS05NODCDC',...
+           'i_mpp2_TS05NODCDC', 'p_dc_pv1_net_TS05NODCDC','p_dc_pv2_TS05NODCDC','ratio_sys_TS05NODCDC','i_pv2_TS05NODCDC','u_pv2_TS05NODCDC'};
+
+sensor5 = {'rad_TS05NODCDC','t_pv_TS05NODCDC','t_batt_TS05NODCDC','t_amb_TS05NODCDC','p_dc_bms_TS05NODCDC'};
+
+
+sensors = {sensor1 sensor2 sensor3 sensor4 sensor5};
+
+systemGroup = {systemGroup1 systemGroup2 systemGroup3 systemGroup4 systemGroup5};
+
+PlotData = true; %true; % Plot Data after read out?
+
+% Measurement interval. Can be used to calculated the expected number of values as values can be missing.
+% Downwards there is an example, how to detect and interpolate missing
+% values. Commented out per default.
+minterval = 0.2; 
+
+%% Import for the conversion from System.DateTime to str
+% Ref System.DateTime
+% https://msdn.microsoft.com/de-de/library/system.datetime%28v=vs.110%29.aspx
+import System.*
+
+% Common path where matlab files and DLLs are located
+%CommonPath = '\\sccfs.scc.kit.edu\oe\eti\Austausch\A_Farrag\Thesis\00_General\Data Analysis\Matlab files\Libraries-m.files\';
+CommonPath = 'Z:\Austausch\00-PCE-HiWis\A_Farrag\Final_Simulation\Library\';
+
+addpath(CommonPath);
+
+%% Collect the relevant Data for the GetData function and Import the DLL
+
+% Import the DLL Data via NET.addAssembly
+% Important: If a newer or other version of the dll is available, the
+% following two lines may have to be changed
+netInfo =  NET.addAssembly([CommonPath 'PCEDB1DBLib.dll']); %  NET.addAssembly(dllPath);
+cls = PCEDB1DBLib.WmsPCEDB1DBApi(serverName, dbName); % WmsPCEDB1DBApi might be changed
+
+%Create start and Stop net Times from input Strings
+startTime = System.DateTime(datenum2datetime(datenum(start)));
+stopTime = System.DateTime(datenum2datetime(datenum(stop)));
+
+%Convert the System.DateTime to datenum
+testDateStart = double(startTime.Ticks()) * 1e-7/86400 + 367; % .NET Start time object
+testDateEnd = double(stopTime.Ticks()) * 1e-7/86400 + 367; % .NET End time object
+durationTime = testDateStart : datenum(0,0,0,0,0,minterval) : testDateEnd; % real measurement time
+testTime = (0:length(durationTime)-1)*minterval; % Virtual measurement time
+
+rowCount = 0;
+for m = 1:length(systemGroup) %loop for the number of systemGroups
+   
+    for n = 1:length(sensors{m}) %loop for the number of Sensors
+        rowCount = rowCount + 1;
+        [count, netValue, netTime] = cls.GetData(dbName, systemGroup{m}, sensors{m}{n}, startTime, stopTime); %Here the data get out
+        
+        %Convert the System.Values to Matlab types
+        MatlabData(:,rowCount) = double(netValue);
+        MatlabTime = datetime2datenumCSharp(netTime);
+
+    end
+    
+end
+
+cls.CloseSqlConnection;
+
+ %% do some plotting vor viewing
+%% Time axis - Secondly
+% dt_sec=1/86400;  % one milli-second fraction of day "Whole day"
+dt_sec=1/50400;  % one milli-second fraction of day "14 hours"
+
+dn_sec=datenum(start):dt_sec:datenum(stop); % generate milli-secondly datenum series
+Time_vector = datetime(dn_sec, 'ConvertFrom', 'datenum'); % convert datenum to datetime series
+%% Resampling with Average
+Z = [sensor1 sensor2 sensor3 sensor4 sensor5];
+sTable = array2table(MatlabData,'VariableNames',Z);
+
+% Reshaping the vectors
+% Environmental Conditions
+t_amb_sec = (sum(reshape(sTable.t_amb_TS05NODCDC,5,50400)))./5;
+rad_sec = (sum(reshape(sTable.rad_TS05NODCDC,5,50400)))./5; 
+t_pv_sec = (sum(reshape(sTable.t_pv_TS05NODCDC,5,50400)))./5;
+% Currents and Voltages
+u_pv1_sec = (sum(reshape(sTable.u_pv1_TS05NODCDC,5,50400)))./5; 
+u_mpp2_sec = (sum(reshape(sTable.u_mpp2_TS05NODCDC,5,50400)))./5; 
+i_pv1_sec = (sum(reshape(sTable.i_pv1_TS05NODCDC,5,50400)))./5; 
+i_mpp2_sec = (sum(reshape(sTable.i_mpp2_TS05NODCDC,5,50400)))./5; 
+u_batt1_sec = (sum(reshape(sTable.u_batt1_TS05NODCDC,5,50400)))./5;
+u_batt2_sec = (sum(reshape(sTable.u_batt2_TS05NODCDC,5,50400)))./5;
+i_batt1_sec = (sum(reshape(sTable.i_batt1_TS05NODCDC,5,50400)))./5;
+i_batt2_sec = (sum(reshape(sTable.i_batt2_TS05NODCDC,5,50400)))./5;
+i_div1_sec = (sum(reshape(sTable.i_div1_TS05NODCDC,5,50400)))./5;
+% Powers
+p_dc_mpp2_sec = (sum(reshape(sTable.p_dc_mpp2_TS05NODCDC,5,50400)))./5;
+p_dc_pv2_sec  = (sum(reshape(sTable.p_dc_pv2_TS05NODCDC,5,50400)))./5;
+p_dc_pv1_sec  = (sum(reshape(sTable.p_dc_pv1_TS05NODCDC,5,50400)))./5;
+p_ac_inv1_sec = (sum(reshape(sTable.p_ac_inv1_TS05NODCDC,5,50400)))./5;
+p_ac_inv2_sec = (sum(reshape(sTable.p_ac_inv2_TS05NODCDC,5,50400)))./5;
+p_dc_inv1_sec = (sum(reshape(sTable.p_dc_inv1_TS05NODCDC,5,50400)))./5;
+p_dc_inv2_sec = (sum(reshape(sTable.p_dc_inv2_TS05NODCDC,5,50400)))./5;
+p_dc_batt1_sec = (sum(reshape(sTable.p_dc_batt1_TS05NODCDC,5,50400)))./5;
+p_dc_batt2_sec = (sum(reshape(sTable.p_dc_batt2_TS05NODCDC,5,50400)))./5;
+p_dc_div1_sec = (sum(reshape(sTable.p_dc_div1_TS05NODCDC,5,50400)))./5;
+p_dc_pv1_net_sec = (sum(reshape(sTable.p_dc_pv1_net_TS05NODCDC,5,50400)))./5;
+
+% Creating time vector
+Time_sequence = (double(0:(count/5)-1));
+
+%% Creating the timeseries
+
+% Environmental Condtions
+rad_profile = timeseries (rad_sec, Time_sequence);
+t_pv_profile = timeseries (t_pv_sec, Time_sequence);
+t_amb_profile = timeseries (t_amb_sec, Time_sequence);
+
+% Currents and Voltages
+u_pv1_profile = timeseries (u_pv1_sec, Time_sequence);
+u_mpp2_profile = timeseries (u_mpp2_sec, Time_sequence);
+i_pv1_profile = timeseries (i_pv1_sec, Time_sequence);
+i_mpp2_profile = timeseries (i_mpp2_sec, Time_sequence);
+u_batt1_profile = timeseries (u_batt1_sec, Time_sequence);
+u_batt2_profile = timeseries (u_batt2_sec, Time_sequence);
+i_batt1_profile = timeseries (i_batt1_sec, Time_sequence);
+i_batt2_profile = timeseries (i_batt2_sec, Time_sequence);
+i_div1_profile = timeseries (i_div1_sec, Time_sequence);
+
+% Powers
+p_dc_pv1_profile = timeseries (p_dc_pv1_sec, Time_sequence);
+p_dc_pv2_profile = timeseries (p_dc_pv2_sec, Time_sequence);
+p_dc_mpp2_profile = timeseries (p_dc_mpp2_sec, Time_sequence);
+p_ac_inv1_profile = timeseries (p_ac_inv1_sec, Time_sequence);
+p_ac_inv2_profile = timeseries (p_ac_inv2_sec, Time_sequence);
+p_dc_inv1_profile = timeseries (p_dc_inv1_sec, Time_sequence);
+p_dc_inv2_profile = timeseries (p_dc_inv2_sec, Time_sequence);
+p_dc_batt1_profile = timeseries (p_dc_batt1_sec, Time_sequence); 
+p_dc_batt2_profile = timeseries (p_dc_batt2_sec, Time_sequence);
+p_dc_div1_profile = timeseries (p_dc_div1_sec, Time_sequence);
+p_dc_pv1_net_profile = timeseries (p_dc_pv1_net_sec, Time_sequence);
+
+%% Initial Temperature of the PV module
+initial_temperature = t_pv_sec(1) + 273.15; %K
+
+%% 1-D look-up table for CV charging
+y1 = linspace(49,49.1,100); % for the battery voltage
+y2 = linspace(8,0.5,100); % for the battery charging current
+
+%% Use cases
+autonomy_days = 2; % Two autonomous days
+% Constant load (constant load with 2 autonoumous days)
+Ebatt_useful = 1900; % Useful battery energy within 6-80% SoC
+autonomy_hr1 = autonomy_days*24; % Two days for autonomy = 48 hours
+Load1 = Ebatt_useful/autonomy_hr1;
+Load_case1(1:50400)= Load1;
+Load_case1_profile = timeseries (Load_case1, Time_sequence);
+
+% Periodic load (periodic load - 3 times a day with 2 autonoumous days)
+day_periods = 3; % Three loading periods per day
+period_hr2= 2; % each period lasts for 2 hours
+autonomy_hr2 = autonomy_days*day_periods*period_hr2;
+Load2 = Ebatt_useful/autonomy_hr2;
+Load_case2 = zeros(50400,1);
+Size_profile = size(Load_case2,1);
+Load_case2(3600:10799)= Load2; % from 07:30 to 09:30
+Load_case2(21600:28799)= Load2; % from 12:30 to 14:30
+Load_case2(39600:46799)= Load2; % from 17:30 to 19:30
+Load_case2_profile = timeseries (Load_case2, Time_sequence);
